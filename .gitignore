@@ -1,0 +1,30 @@
+# Environment & Secrets
+.env
+*.json
+!package.json
+gcp-key*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project caches
+results/
+*.log
+
