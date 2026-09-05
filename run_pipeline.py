@@ -22,9 +22,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Suppress internal OpenCV C++ warnings
+os.environ["OPENCV_LOG_LEVEL"] = "OFF"
 
 # Ensure local imports
 sys.path.insert(0, str(Path(__file__).parent))
@@ -128,8 +132,10 @@ def run_pipeline(
 
     # -------------------------------------------------------------
     # STEP 4: Render Results Table
+    # STEP 4: Decision Diamond — Verified Matches vs Discarded Lookalikes
     # -------------------------------------------------------------
     console.print(f"\n[bold yellow]STEP 4: Search & Biometric Verification Report[/bold yellow]")
+    console.print(f"\n[bold yellow]STEP 4: Biometric Decision Diamond (Threshold ≥ 0.363)[/bold yellow]")
 
     table = Table(box=box.ROUNDED, show_lines=True, title="🔍 Verified Social Matches vs Candidates")
     table.add_column("#", width=3, justify="right")
@@ -139,6 +145,8 @@ def run_pipeline(
     table.add_column("Domain", width=18)
     table.add_column("Title / Snippet", width=35, overflow="fold")
     table.add_column("URL", width=55, overflow="fold")
+    verified_matches = [m for m in search_resp.matches if m.biometrically_verified]
+    discarded_lookalikes = [m for m in search_resp.matches if not m.biometrically_verified]
 
     for i, m in enumerate(search_resp.matches[:25], 1):
         if m.biometrically_verified:
@@ -157,6 +165,19 @@ def run_pipeline(
             status_text = f"[dim]{m.verification_status}[/dim]"
             sim_text = "—"
             row_style = ""
+    # --- Table 1: Verified Identity Matches (YES Branch) ---
+    table_verified = Table(
+        box=box.HEAVY_EDGE,
+        show_lines=True,
+        title=f"✅  Verified Identity Matches (Score ≥ 0.363) — [bold green]{len(verified_matches)} Found[/bold green]",
+        title_style="bold green",
+    )
+    table_verified.add_column("#", width=3, justify="right", style="dim")
+    table_verified.add_column("Biometric Score", width=16, justify="center")
+    table_verified.add_column("Platform", style="bold green", width=14)
+    table_verified.add_column("Domain", width=20)
+    table_verified.add_column("Title / Snippet", width=35, overflow="fold")
+    table_verified.add_column("Verified URL", width=55, overflow="fold")
 
         table.add_row(
             str(i),
@@ -167,9 +188,49 @@ def run_pipeline(
             m.title[:60] if m.title else "—",
             m.url[:80],
             style=row_style,
+    if verified_matches:
+        for i, m in enumerate(verified_matches, 1):
+            sim_pct = (m.biometric_similarity or 0) * 100
+            table_verified.add_row(
+                str(i),
+                f"[bold green]{sim_pct:.1f}% Match[/bold green]",
+                m.platform or "Web Profile",
+                m.domain,
+                m.title[:60] if m.title else "—",
+                m.url[:85],
+            )
+        console.print(table_verified)
+    else:
+        console.print(
+            Panel(
+                "[yellow]No candidate met the biometric threshold (≥ 0.363).\n"
+                "All returned results were discarded as lookalikes or unverified links.[/yellow]",
+                title="⚠️  No Verified Matches",
+                border_style="yellow",
+            )
         )
 
     console.print(table)
+    # --- Summary Box: Discarded Lookalikes (NO Branch) ---
+    console.print()
+    discard_lines = [
+        f"[bold red]Total Discarded Lookalikes:[/bold red] {len(discarded_lookalikes)}",
+        "[dim]These links failed the biometric face match and are strictly purged from the blockchain payload.[/dim]",
+        "",
+        "[bold]Sample Filtered-Out Candidates:[/bold]",
+    ]
+    for m in discarded_lookalikes[:4]:
+        score_str = f"Similarity: {(m.biometric_similarity or 0)*100:.1f}%" if m.biometric_similarity is not None else m.verification_status
+        discard_lines.append(f"  ❌ [{score_str}] {m.domain} — {m.url[:70]}")
+
+    console.print(
+        Panel(
+            "\n".join(discard_lines),
+            title=f"❌ Discarded Lookalikes ({len(discarded_lookalikes)} Purged)",
+            border_style="red",
+            padding=(0, 2),
+        )
+    )
 
     # -------------------------------------------------------------
     # STEP 5: Tamper-Evident Record Preparation (Phase 4 Ready)
@@ -180,6 +241,7 @@ def run_pipeline(
     social_candidates = search_resp.social_matches
 
     # Cryptographic record payload
+    # Cryptographic record payload contains ONLY verified matches
     record_payload = {
         "schema": "HH_GOA_TASK3_RECORD_V1",
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
@@ -187,6 +249,7 @@ def run_pipeline(
         "input_image_name": Path(image_path).name,
         "confidence_score": round(primary_face.confidence, 4),
         "verified_matches_count": len(verified),
+        "verified_matches_count": len(verified_matches),
         "verified_matches": [
             {
                 "url": m.url,
@@ -194,11 +257,13 @@ def run_pipeline(
                 "similarity_score": m.biometric_similarity,
             }
             for m in verified
+            for m in verified_matches
         ],
         "top_social_candidates": [
             {"platform": m.platform, "url": m.url, "domain": m.domain}
             for m in social_candidates[:5]
         ],
+        "lookalikes_purged_count": len(discarded_lookalikes),
     }
 
     record_json_str = json.dumps(record_payload, sort_keys=True)
@@ -210,8 +275,13 @@ def run_pipeline(
         f"[bold]Verified Matches:[/bold] {len(verified)}\n"
         f"[bold]Social Candidates Found:[/bold] {len(social_candidates)}\n"
         f"[bold]Ready to Write to Chain:[/bold] Polygon Amoy / Local Hardhat"
+        f"[bold]Biometric Face Hash (E1):[/bold] {emb_hash}\n"
+        f"[bold]Verified Identity Records Included:[/bold] {len(verified_matches)}\n"
+        f"[bold]Lookalikes Excluded & Purged:[/bold] {len(discarded_lookalikes)}\n"
+        f"[bold]Status:[/bold] [bold green]Ready for Smart Contract / Testnet Write[/bold green]"
     )
     console.print(Panel(blockchain_summary, title="⛓️ Blockchain Record Ready", border_style="green"))
+    console.print(Panel(blockchain_summary, title="⛓️ Tamper-Evident Blockchain Payload", border_style="green"))
 
     # Save to disk
     out_file = save_json or f"results/pipeline_run_{int(datetime.now().timestamp())}.json"
