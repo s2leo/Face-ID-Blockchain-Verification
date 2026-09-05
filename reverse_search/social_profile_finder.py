@@ -48,13 +48,18 @@ SERPAPI_ENDPOINT = "https://serpapi.com/search.json"
 # Social platforms to search for, in priority order
 # Each entry: (site_query, platform_label)
 SOCIAL_SITE_QUERIES: list[tuple[str, str]] = [
-    ("site:instagram.com",          "Instagram"),
-    ("site:facebook.com",           "Facebook"),
-    ("site:x.com OR site:twitter.com", "Twitter/X"),
-    ("site:linkedin.com",           "LinkedIn"),
-    ("site:youtube.com",            "YouTube"),
-    ("site:tiktok.com",             "TikTok"),
-    ("site:reddit.com",             "Reddit"),
+    ("site:instagram.com",                  "Instagram"),
+    ("site:facebook.com",                   "Facebook"),
+    ("site:x.com OR site:twitter.com",      "Twitter/X"),
+    ("site:linkedin.com",                   "LinkedIn"),
+    ("site:github.com",                     "GitHub"),
+    ("site:youtube.com",                    "YouTube"),
+    ("site:tiktok.com",                     "TikTok"),
+    ("site:reddit.com",                     "Reddit"),
+    ("site:threads.com OR site:threads.net","Threads"),
+    ("site:researchgate.net",               "ResearchGate"),
+    ("site:medium.com",                     "Medium"),
+    ("site:pinterest.com",                  "Pinterest"),
 ]
 
 # Minimum times a name token cluster must appear across titles to be trusted
