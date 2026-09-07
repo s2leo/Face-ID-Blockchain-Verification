@@ -110,7 +110,8 @@ class FacePipeline:
         image_path: str,
         output_dir: Optional[str] = None,
         face_index: Optional[int] = None,
-        headshot_margin: float = 0.35,
+        headshot_margin: float = 0.60,   # #3: raised from 0.35 — more context improves search engine matching
+        min_headshot_px: int = 300,       # #3: minimum output dimension to avoid tiny crops on small faces
     ) -> FaceDetectionResult:
         """
         Process an image:
@@ -174,6 +175,7 @@ class FacePipeline:
             embedding_128d = feature.flatten().tolist()
 
             # 3. Create high-resolution portrait crop (optimal for search engines)
+            # #3: margin is 60% of face bbox in each direction for more hair/shoulder context
             mx = int(box[2] * headshot_margin)
             my = int(box[3] * headshot_margin)
             x1 = max(0, box[0] - mx)
@@ -182,8 +184,20 @@ class FacePipeline:
             y2 = min(h, box[1] + box[3] + my)
 
             headshot_crop = img[y1:y2, x1:x2]
+
+            # #3: enforce minimum dimension — upscale tiny crops so search engines
+            # can extract meaningful features (small faces in group photos etc.)
+            crop_h, crop_w = headshot_crop.shape[:2]
+            if crop_h < min_headshot_px or crop_w < min_headshot_px:
+                scale = min_headshot_px / min(crop_h, crop_w)
+                new_w = int(crop_w * scale)
+                new_h = int(crop_h * scale)
+                headshot_crop = cv2.resize(
+                    headshot_crop, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4
+                )
+
             headshot_path = str(out_folder / f"{path.stem}_headshot_{i}.jpg")
-            cv2.imwrite(headshot_path, headshot_crop)
+            cv2.imwrite(headshot_path, headshot_crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
 
             face_profile = FaceProfile(
                 index=i,

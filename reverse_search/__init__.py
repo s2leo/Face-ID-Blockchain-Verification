@@ -26,6 +26,7 @@ from reverse_search.google_vision import GoogleVisionProvider
 from reverse_search.bing_visual import BingVisualProvider
 from reverse_search.biometric_verifier import BiometricVerifier
 from reverse_search.social_profile_finder import find_social_profiles, extract_candidate_name
+from reverse_search.gemini_vision import GeminiVisionAnalyzer, GeminiAnalysis
 
 PROVIDERS: dict[str, type] = {
     "serpapi":       SerpApiLensProvider,
@@ -72,6 +73,8 @@ __all__ = [
     "merge_responses",
     "find_social_profiles",
     "extract_candidate_name",
+    "GeminiVisionAnalyzer",
+    "GeminiAnalysis",
     "SearchMatch",
     "SearchResponse",
     "BaseProvider",
