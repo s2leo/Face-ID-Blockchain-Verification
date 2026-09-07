@@ -46,6 +46,8 @@ from reverse_search import (
     BiometricVerifier,
     PROVIDERS,
     SearchResponse,
+    GeminiVisionAnalyzer,
+    GeminiAnalysis,
 )
 
 console = Console()
@@ -74,6 +76,7 @@ def run_pipeline(
     face_index: int | None = None,
     verify_biometrics: bool = True,
     social_lookup: bool = True,
+    use_gemini: bool = True,
     person_name: str | None = None,
     save_json: str | None = None,
 ):
@@ -112,6 +115,79 @@ def run_pipeline(
     console.print(Panel(face_summary, title="👤 Biometric Profile Extracted", border_style="cyan"))
 
     search_input = primary_face.cropped_headshot_path or image_path
+
+    # -------------------------------------------------------------------------
+    # STEP 1.5: Gemini Vision Analysis
+    # Extracts person identity, visible text (badges/nametags), context clues,
+    # and generates targeted search queries — critical for non-famous individuals
+    # -------------------------------------------------------------------------
+    gemini_analysis: GeminiAnalysis | None = None
+    gemini_name: str | None = None          # name Gemini found (overrides image-search detection)
+    gemini_queries: list[str] = []          # ready-to-use search queries from Gemini
+
+    if use_gemini:
+        console.print(f"\n[bold yellow]STEP 1.5: Gemini Vision Analysis[/bold yellow]")
+        with console.status("[bold green]Asking Gemini to analyze the photo..."):
+            analyzer = GeminiVisionAnalyzer()
+            # Use the original image — more context than the headshot crop
+            gemini_analysis = analyzer.analyze(image_path)
+
+        if not gemini_analysis.succeeded:
+            console.print(f"   [yellow]⚠ Gemini unavailable: {gemini_analysis.error}[/yellow]")
+            console.print("   [dim]Continuing without Gemini — pipeline still works.[/dim]")
+        else:
+            gemini_name    = gemini_analysis.best_name
+            gemini_queries = gemini_analysis.generated_queries
+
+            # Build display lines
+            lines = []
+            if gemini_analysis.identified_person:
+                conf = gemini_analysis.identification_confidence
+                conf_colour = {"high": "bold green", "medium": "green", "low": "yellow"}.get(conf, "dim")
+                lines.append(
+                    f"[bold]Identity:[/bold] [{conf_colour}]{gemini_analysis.identified_person}[/{conf_colour}]"
+                    f"  ([dim]{conf} confidence — {gemini_analysis.identification_source or 'model recognition'}[/dim])"
+                )
+            else:
+                lines.append("[bold]Identity:[/bold] [dim]Not recognised as a public figure[/dim]")
+
+            if gemini_analysis.person_name_from_text:
+                lines.append(
+                    f"[bold]Name from image text:[/bold] [bold cyan]{gemini_analysis.person_name_from_text}[/bold cyan]"
+                    f"  [dim](read from badge / caption / nametag)[/dim]"
+                )
+
+            if gemini_analysis.visible_text:
+                lines.append(f"[bold]Visible text:[/bold] {', '.join(gemini_analysis.visible_text[:8])}")
+
+            if gemini_analysis.context_clues:
+                lines.append(f"[bold]Context clues:[/bold] {', '.join(gemini_analysis.context_clues[:5])}")
+
+            if gemini_analysis.face_description:
+                lines.append(f"[bold]Face description:[/bold] {gemini_analysis.face_description}")
+
+            if gemini_queries:
+                lines.append(f"[bold]Generated queries:[/bold] {len(gemini_queries)} targeted search queries")
+                for q in gemini_queries[:3]:
+                    lines.append(f"   [dim]→ {q}[/dim]")
+
+            if gemini_name:
+                lines.append(
+                    f"\n[bold bright_white]→ Using name for social lookup:[/bold bright_white] "
+                    f"[bold cyan]{gemini_name}[/bold cyan]"
+                )
+            else:
+                lines.append(
+                    "\n[dim]No name found by Gemini — will fall back to title extraction "
+                    "from search results.[/dim]"
+                )
+
+            border = "green" if gemini_name else "yellow"
+            console.print(Panel(
+                "\n".join(lines),
+                title="🤖 Gemini Vision Report",
+                border_style=border,
+            ))
 
     # -------------------------------------------------------------------------
     # STEP 2: Reverse Image Search  [Option A — single or multi-provider]
@@ -170,13 +246,43 @@ def run_pipeline(
     detected_name: str | None = person_name
     if social_lookup:
         console.print(f"\n[bold yellow]STEP 2b: Social Profile Lookup (Instagram / Facebook / X / LinkedIn)[/bold yellow]")
-        console.print("   Extracting person name from match titles...")
+
+        # Name priority: --person-name flag > Gemini vision > title extraction
+        forced_name = person_name or gemini_name
+        if forced_name:
+            source = "--person-name flag" if person_name else "Gemini Vision"
+            console.print(f"   Name source     : [bold cyan]{forced_name}[/bold cyan]  [dim](from {source})[/dim]")
+        else:
+            console.print("   Extracting person name from match titles...")
 
         all_titles = [m.title for m in search_resp.matches if m.title]
         detected_name, profile_matches = find_social_profiles(
             match_titles=all_titles,
-            person_name=person_name,  # manual override if --person-name passed
+            person_name=forced_name,
         )
+
+        # Also run Gemini's generated queries directly as Google searches
+        if gemini_queries and detected_name:
+            from reverse_search.social_profile_finder import _google_search
+            import os as _os
+            _api_key = _os.getenv("SERPAPI_API_KEY", "")
+            if _api_key:
+                console.print(f"   Running [bold]{len(gemini_queries)}[/bold] Gemini-generated queries...")
+                seen_urls = {m.url for m in profile_matches}
+                for query in gemini_queries:
+                    results = _google_search(query, _api_key, num=5)
+                    from reverse_search.base import SearchMatch
+                    for item in results:
+                        url = item.get("link", "")
+                        if url and url not in seen_urls:
+                            seen_urls.add(url)
+                            profile_matches.append(SearchMatch(
+                                url=url,
+                                title=item.get("title", ""),
+                                snippet=item.get("snippet", ""),
+                                thumbnail=item.get("thumbnail", ""),
+                                match_type="profile_search",
+                            ))
 
         if detected_name:
             console.print(f"   Detected name   : [bold cyan]{detected_name}[/bold cyan]")
@@ -350,6 +456,7 @@ def run_pipeline(
         "input_image_name": Path(image_path).name,
         "search_providers": providers_to_run,
         "detected_person_name": detected_name,
+        "gemini_analysis": gemini_analysis.to_dict() if gemini_analysis and gemini_analysis.succeeded else None,
         "detector_confidence": round(primary_face.confidence, 4),
         "verified_matches_count": len(verified_matches),
         "verified_matches": [
@@ -384,10 +491,17 @@ def run_pipeline(
     record_hash = hashlib.sha256(record_json_str.encode()).hexdigest()
 
     name_line = f"\n[bold]Detected Person:[/bold] [bold cyan]{detected_name}[/bold cyan]" if detected_name else ""
+    gemini_line = ""
+    if gemini_analysis and gemini_analysis.succeeded:
+        if gemini_analysis.identified_person:
+            gemini_line = f"\n[bold]Gemini ID:[/bold] [green]{gemini_analysis.identified_person}[/green]  [dim]({gemini_analysis.identification_confidence} confidence)[/dim]"
+        elif gemini_analysis.visible_text:
+            gemini_line = f"\n[bold]Gemini text:[/bold] [dim]{', '.join(gemini_analysis.visible_text[:4])}[/dim]"
     blockchain_summary = (
         f"[bold]Record Payload Hash (SHA-256):[/bold] [bold bright_green]{record_hash}[/bold bright_green]\n"
         f"[bold]Face Embedding Hash (SHA-256):[/bold] {emb_hash}"
-        f"{name_line}\n"
+        f"{name_line}"
+        f"{gemini_line}\n"
         f"[bold]Search Provider(s):[/bold] {provider_label}\n"
         f"[bold]Verified Identity Matches:[/bold] {len(verified_matches)}\n"
         f"[bold]Match Breakdown:[/bold]  "
@@ -455,6 +569,10 @@ Examples:
         help="Skip biometric candidate verification step",
     )
     parser.add_argument(
+        "--no-gemini", action="store_true",
+        help="Skip Gemini Vision analysis (Step 1.5)",
+    )
+    parser.add_argument(
         "--no-social-lookup", action="store_true",
         help="Skip Option B name-based social profile lookup",
     )
@@ -477,6 +595,7 @@ Examples:
         multi_providers=args.providers,
         face_index=args.face_index,
         verify_biometrics=not args.no_verify,
+        use_gemini=not args.no_gemini,
         social_lookup=not args.no_social_lookup,
         person_name=args.person_name,
         save_json=args.save_json,

@@ -65,8 +65,58 @@ SOCIAL_SITE_QUERIES: list[tuple[str, str]] = [
 # Minimum times a name token cluster must appear across titles to be trusted
 NAME_MIN_FREQUENCY = 2
 
-# Maximum results to fetch per platform query
-RESULTS_PER_PLATFORM = 5
+# Maximum results to fetch per platform query (#2: raised from 5 → 10)
+RESULTS_PER_PLATFORM = 10
+
+
+def _levenshtein(a: str, b: str) -> int:
+    """Simple Levenshtein distance — used for fuzzy name variant merging."""
+    if a == b:
+        return 0
+    if len(a) < len(b):
+        a, b = b, a
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        curr = [i]
+        for j, cb in enumerate(b, 1):
+            curr.append(min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = curr
+    return prev[-1]
+
+
+def _merge_name_variants(phrase_counts: Counter) -> Counter:
+    """
+    #8: Merge counts for phonetic/spelling variants of the same name.
+    e.g. "Shruti Haasan" and "Shruti Hassan" → both count under "Shruti Haasan"
+    (the one with higher count absorbs the other if edit distance on any word ≤ 2).
+    Returns a new Counter with variants collapsed.
+    """
+    names = list(phrase_counts.keys())
+    merged: dict[str, str] = {}  # variant → canonical
+
+    for i, name_a in enumerate(names):
+        if name_a in merged:
+            continue
+        words_a = name_a.split()
+        for name_b in names[i + 1:]:
+            if name_b in merged:
+                continue
+            words_b = name_b.split()
+            if len(words_a) != len(words_b):
+                continue
+            # Names match if every word pair has edit distance ≤ 2
+            if all(_levenshtein(wa.lower(), wb.lower()) <= 2
+                   for wa, wb in zip(words_a, words_b)):
+                # Keep the one with higher count as canonical
+                canonical = name_a if phrase_counts[name_a] >= phrase_counts[name_b] else name_b
+                variant   = name_b if canonical == name_a else name_a
+                merged[variant] = canonical
+
+    result: Counter = Counter()
+    for name, count in phrase_counts.items():
+        canonical = merged.get(name, name)
+        result[canonical] += count
+    return result
 
 
 def extract_candidate_name(titles: list[str]) -> Optional[str]:
@@ -108,6 +158,9 @@ def extract_candidate_name(titles: list[str]) -> Optional[str]:
 
     if not phrase_counts:
         return None
+
+    # #8: merge spelling variants (Haasan / Hassan, etc.) before ranking
+    phrase_counts = _merge_name_variants(phrase_counts)
 
     # Prefer 2-word names that appear frequently
     two_word_candidates = [
