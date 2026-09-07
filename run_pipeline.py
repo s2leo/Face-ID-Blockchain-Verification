@@ -38,6 +38,15 @@ from rich.panel import Panel
 from rich.table import Table
 from rich import box
 
+# Rich panels contain Unicode symbols; force UTF-8 on Windows consoles that
+# otherwise default to CP1252 and fail before the pipeline can start.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
 from face_pipeline import FacePipeline
 from reverse_search import (
     search_image,
@@ -49,6 +58,12 @@ from reverse_search import (
     GeminiVisionAnalyzer,
     GeminiAnalysis,
 )
+from blockchain.config import BlockchainConfigError
+from blockchain.record_builder import build_match_record, hash_record
+from blockchain.uploader import upload_record
+from blockchain.verify import print_verification_report, verify_transaction
+from blockchain.local_chain import LocalChain
+from blockchain.local_verify import print_chain, print_local_verification_report, verify_local_record
 
 console = Console()
 
@@ -79,6 +94,10 @@ def run_pipeline(
     use_gemini: bool = True,
     person_name: str | None = None,
     save_json: str | None = None,
+    blockchain_upload: bool = True,
+    blockchain_mode: str = "local",
+    chain_path: str = "chain.json",
+    max_verify_candidates: int | None = 25,
 ):
     render_banner()
 
@@ -316,10 +335,23 @@ def run_pipeline(
     # -------------------------------------------------------------------------
     if verify_biometrics and search_resp.match_count > 0:
         console.print(f"\n[bold yellow]STEP 3: Biometric Verification Filter (Lookalike Rejection)[/bold yellow]")
-        console.print("   Downloading candidate thumbnails & computing cosine similarity...")
+        candidates_for_verification = search_resp.matches
+        remaining_candidates = []
+        if max_verify_candidates and len(candidates_for_verification) > max_verify_candidates:
+            candidates_for_verification = candidates_for_verification[:max_verify_candidates]
+            remaining_candidates = search_resp.matches[max_verify_candidates:]
+            console.print(
+                f"   Verifying top {max_verify_candidates} of {len(search_resp.matches)} candidates "
+                "to keep the run time predictable..."
+            )
+        else:
+            console.print("   Downloading candidate thumbnails & computing cosine similarity...")
+        search_resp.matches = candidates_for_verification
         verifier = BiometricVerifier(face_pipeline=pipeline)
         with console.status("[bold green]Verifying candidates against 128D embedding..."):
             search_resp = verifier.verify_response(search_resp, emb)
+        # Keep the unverified tail in the audit trail, after the ranked subset.
+        search_resp.matches.extend(remaining_candidates)
 
     # -------------------------------------------------------------------------
     # STEP 4: Results Tables
@@ -487,6 +519,54 @@ def run_pipeline(
         },
     }
 
+    blockchain_record = None
+    blockchain_record_hash = None
+    blockchain_tx_hash = None
+
+    if verified_matches:
+        top_match = verified_matches[0]
+        blockchain_record = build_match_record(emb_hash, top_match)
+        blockchain_record_hash = hash_record(blockchain_record)
+        record_payload["blockchain_record"] = blockchain_record
+        record_payload["blockchain_record_hash_sha256"] = blockchain_record_hash
+
+        if blockchain_upload:
+            if blockchain_mode == "local":
+                console.print("\n[bold yellow]STEP 6: Local Blockchain Write[/bold yellow]")
+                console.print(f"   Persisting the verified match hash to {chain_path}...")
+                chain = LocalChain(chain_path)
+                block = chain.add_block({
+                    "record": blockchain_record,
+                    "record_hash": blockchain_record_hash,
+                })
+                console.print(f"   [green]Block index:[/green] {block.index}")
+                console.print(f"   [green]Block hash:[/green] {block.hash}")
+                console.print(f"   [green]Chain valid:[/green] {chain.validate_chain()}")
+                record_payload["blockchain_mode"] = "local"
+                record_payload["blockchain_block_index"] = block.index
+                record_payload["blockchain_block_hash"] = block.hash
+                record_payload["blockchain_chain_file"] = chain_path
+            else:
+                console.print("\n[bold yellow]STEP 6: Polygon Amoy Blockchain Write[/bold yellow]")
+                console.print("   Writing the verified match hash in a zero-value self-transfer...")
+                try:
+                    upload_result = upload_record(blockchain_record)
+                    blockchain_tx_hash = upload_result.tx_hash
+                    console.print(f"   [green]Transaction:[/green] {upload_result.tx_hash}")
+                    console.print(f"   [green]Block:[/green] {upload_result.block_number}")
+                    console.print(f"   [green]Explorer:[/green] {upload_result.explorer_url}")
+                    record_payload["blockchain_mode"] = "polygon_amoy"
+                    record_payload["blockchain_transaction_hash"] = upload_result.tx_hash
+                    record_payload["blockchain_block_number"] = upload_result.block_number
+                    record_payload["blockchain_explorer_url"] = upload_result.explorer_url
+                except (BlockchainConfigError, RuntimeError, ValueError) as exc:
+                    console.print(f"   [yellow]Blockchain upload skipped:[/yellow] {exc}")
+                    console.print("   [dim]Add wallet settings to .env to enable Polygon mode.[/dim]")
+        else:
+            console.print("\n[dim]Blockchain upload disabled with --no-blockchain.[/dim]")
+    else:
+        console.print("\n[yellow]No verified match available for blockchain recording.[/yellow]")
+
     record_json_str = json.dumps(record_payload, sort_keys=True)
     record_hash = hashlib.sha256(record_json_str.encode()).hexdigest()
 
@@ -546,7 +626,23 @@ Examples:
   python run_pipeline.py --image samples/Anuj.jpg --no-social-lookup
         """,
     )
-    parser.add_argument("--image", "-i", required=True, help="Path to input photo")
+    parser.add_argument("--image", "-i", required=False, help="Path to input photo")
+    parser.add_argument(
+        "--verify-tx", metavar="TX_HASH",
+        help="Verify an existing Polygon transaction using --record-json",
+    )
+    parser.add_argument(
+        "--verify-only", action="store_true",
+        help="Verify the blockchain record in --record-json without running the pipeline",
+    )
+    parser.add_argument(
+        "--show-chain", action="store_true",
+        help="Display the local chain and validate every block",
+    )
+    parser.add_argument(
+        "--record-json", metavar="PATH",
+        help="Audit JSON containing blockchain_record for --verify-tx",
+    )
     parser.add_argument(
         "--provider", "-p", default="serpapi", choices=list(PROVIDERS.keys()),
         help="Single provider (default: serpapi). Ignored when --multi-provider is set.",
@@ -585,8 +681,55 @@ Examples:
         "--save-json", "-o", default=None,
         help="Output JSON audit file path",
     )
+    parser.add_argument(
+        "--no-blockchain", action="store_true",
+        help="Do not write a blockchain record",
+    )
+    parser.add_argument(
+        "--blockchain-mode", choices=("local", "polygon"), default="local",
+        help="Blockchain backend (default: local; polygon requires a funded wallet)",
+    )
+    parser.add_argument(
+        "--chain-file", default="chain.json",
+        help="Local chain JSON path (default: chain.json)",
+    )
+    parser.add_argument(
+        "--max-verify-candidates", type=int, default=25,
+        help="Maximum candidate images to download for biometric verification (default: 25)",
+    )
 
     args = parser.parse_args()
+
+    if args.show_chain:
+        print_chain(args.chain_file)
+        return
+
+    if args.verify_only:
+        if not args.record_json:
+            parser.error("--verify-only requires --record-json PATH")
+        with open(args.record_json, "r", encoding="utf-8") as f:
+            audit = json.load(f)
+        blockchain_record = audit.get("record_payload", {}).get("blockchain_record")
+        if not blockchain_record:
+            parser.error("The audit JSON does not contain record_payload.blockchain_record")
+        result = verify_local_record(blockchain_record, args.chain_file)
+        print_local_verification_report(result)
+        return
+
+    if args.verify_tx:
+        if not args.record_json:
+            parser.error("--verify-tx requires --record-json PATH")
+        with open(args.record_json, "r", encoding="utf-8") as f:
+            audit = json.load(f)
+        blockchain_record = audit.get("record_payload", {}).get("blockchain_record")
+        if not blockchain_record:
+            parser.error("The audit JSON does not contain record_payload.blockchain_record")
+        result = verify_transaction(blockchain_record, args.verify_tx)
+        print_verification_report(result)
+        return
+
+    if not args.image:
+        parser.error("--image is required unless --verify-tx is used")
 
     run_pipeline(
         image_path=args.image,
@@ -599,6 +742,10 @@ Examples:
         social_lookup=not args.no_social_lookup,
         person_name=args.person_name,
         save_json=args.save_json,
+        blockchain_upload=not args.no_blockchain,
+        blockchain_mode=args.blockchain_mode,
+        chain_path=args.chain_file,
+        max_verify_candidates=args.max_verify_candidates,
     )
 
 
