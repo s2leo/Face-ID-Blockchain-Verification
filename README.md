@@ -1,53 +1,83 @@
 # Face-ID-Blockchain-Verification
 
-This project detects and encodes a face, searches for matching public web/social
-results, verifies candidate faces biometrically, and records the top verified
-match in a local tamper-evident blockchain ledger by default.
+This project builds an end-to-end face identity verification pipeline:
+
+- detects a face in an input photo
+- extracts a biometric embedding
+- searches public web and social sources for likely matches
+- re-verifies candidates using face similarity
+- stores the verified match hash in a tamper-evident blockchain record
+
+It is designed for workflows where you want both biometric verification and an
+audit trail for the final identity match.
+
+## What It Uses
+
+- Face detection and alignment with OpenCV-based models
+- Reverse image and social profile search providers
+- Optional Gemini Vision analysis to improve identity and query extraction
+- A local tamper-evident blockchain ledger
 
 ## Setup
+
+Create a virtual environment and install dependencies:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
+```
+
+Copy the example environment file and add your API keys:
+
+```powershell
 Copy-Item .env.example .env
 ```
 
-Add the search API keys to `.env`. The default local ledger does not need a
-wallet or RPC. Polygon Amoy remains available as an optional backend:
+Required values depend on which providers you use. For example, add the search
+provider keys you want to run with.
 
-```text
-AMOY_RPC_URL=https://polygon-amoy.drpc.org
-WALLET_ADDRESS=0x...
-WALLET_PRIVATE_KEY=...
-```
+## How To Run
 
-The local ledger writes to `chain.json`. Polygon mode requires a funded
-throwaway wallet and writes the canonical match hash in a zero-value
-self-transfer, verifiable independently on PolygonScan.
-
-## Run
+Run the full pipeline on a sample image:
 
 ```powershell
 python run_pipeline.py --image samples\Anuj.jpg --provider serpapi
 ```
 
-The run saves an audit file under `results/` and writes a block to `chain.json`.
-To verify the recorded match later:
+Useful options:
 
 ```powershell
-python run_pipeline.py --verify-only --record-json results\pipeline_run_<timestamp>.json
-python run_pipeline.py --show-chain
+python run_pipeline.py --image samples\Anuj.jpg --multi-provider
+python run_pipeline.py --image samples\Anuj.jpg --no-social-lookup
+python run_pipeline.py --image samples\Anuj.jpg --no-blockchain
 ```
 
-Use `--blockchain-mode polygon` to opt into Polygon Amoy, or `--no-blockchain`
-for face/search testing without any ledger write.
+The run saves an audit JSON file under `results/` and writes a blockchain
+record if blockchain output is enabled.
 
-## Known Limitations
+To inspect or verify results later:
 
-- The default blockchain step is a local ledger, not a decentralized public
-  chain. Polygon Amoy is available with `--blockchain-mode polygon`.
-- Polygon mode requires test POL and a reachable RPC.
-- Reverse-image providers may return no public match or may rate-limit requests.
-- A transaction stores the canonical hash, not the private face image or full
-  biometric vector.
+```powershell
+python run_pipeline.py --show-chain
+python run_pipeline.py --verify-only --record-json results\pipeline_run_<timestamp>.json
+```
+
+## Blockchain Used
+
+The project uses a local tamper-evident blockchain ledger. The default `local`
+mode stores each verified-match hash in `chain.json`, links each block to the
+previous block, and validates the chain before completing the run. It does not
+require a wallet, RPC connection, or external blockchain account.
+
+## Output Files
+
+- `results/pipeline_run_<timestamp>.json`: full audit trail for the run
+- `chain.json`: local blockchain ledger
+- `samples/crops/`: generated face crops and headshots
+
+## Notes
+
+- Reverse-image providers may return no public match or may rate limit requests.
+- The blockchain record stores the canonical match hash, not the raw face image
+  or full biometric vector.
